@@ -300,6 +300,34 @@ const char *password = "Your_PASSWORD";
     </td>
   </tr>
 </table>
+
+<br>
+
+<table>
+  <tr>
+    <th colspan="4">📊 Battery Life Analysis - Test #4 (With ESP32 C6)</th>
+  </tr>
+  <tr>
+    <td><strong>Start Date</strong></td>
+    <td><strong>End Date</strong></td>
+    <td><strong>Runtime</strong></td>
+    <td><strong>Status</strong></td>
+  </tr>
+  <tr>
+    <td>Feb 4, 2026</td>
+    <td>TBD</td>
+    <td>TBD</td>
+    <td>ONGOING</td>
+  </tr>
+  <tr>
+    <td colspan="4">
+      <strong>Performance Metrics</strong><br>
+      🔋 Initial Voltage: 3.54V<br>
+      📉 Final Voltage: TBD<br>
+      🌡️ Temperature Range: 17-TBD°C
+    </td>
+  </tr>
+</table>
 </div>
 
 ## 📸 Gallery 🖼️
