@@ -61,19 +61,35 @@ DateTime alarm1Time = DateTime(2025, 4, 6, 13, 35, 0); // Set the alarm time (ye
 #define battHigh 3.3 // Full battery threshold (ideally this should be the resting voltage, i.e. ~3.4V but my ESP32 reads it 3.36V)
 #define battLow 2.9  // Low battery threshold
 
-const char *ssid = "SonyBraviaX400";  // Your WiFi SSID
-const char *password = "79756622761"; // Your WiFi password
+const char *ssid = "SonyBraviaX400";      // Your WiFi SSID
+const char *password = "66227617975PsA#"; // Your WiFi password
 
-WiFiUDP ntpUDP;                                           // Create a UDP instance to send and receive NTP packets
-NTPClient timeClient(ntpUDP, "asia.pool.ntp.org", 19800); // 19800 is offset of India, asia.pool.ntp.org is close to India
+WiFiUDP ntpUDP;                                         // Create a UDP instance to send and receive NTP packets
+NTPClient timeClient(ntpUDP, "in.pool.ntp.org", 19800); // 19800 is offset of India, in.pool.ntp.org is close to India
 // Weekday names for display
 static const char daysOfTheWeek[7][10] PROGMEM = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-
 #define COLORED 0   // 0 is black
 #define UNCOLORED 1 // 1 is white
 
 UBYTE image[68000];
 Epd epd;
+
+byte getWiFiBars()
+{
+  if (WiFi.status() != WL_CONNECTED)
+    return 0;
+
+  int rssi = WiFi.RSSI();
+  if (rssi >= -55)
+    return 5;
+  if (rssi >= -65)
+    return 4;
+  if (rssi >= -72)
+    return 3;
+  if (rssi >= -80)
+    return 2;
+  return 1;
+}
 /**
  * @brief Measures battery voltage with averaging
  * @return float Actual battery voltage in volts
@@ -191,12 +207,12 @@ void setup()
   BH1750 lightMeter(0x23); // Initalize light sensor
   Preferences pref;        // preference library object
   byte errFlag = 0;        // Error flag for various error messages
+  byte wifiBars = 0;       // 0 = not connected, 1-5 = signal level
 
   if (!rtc.begin())
   {
     Serial.println("Couldn't find RTC");
-    // showMsg("RTC Error");
-    errFlag += 2;
+    errFlag |= 2;
   }
   // We don't need the 32K Pin, so disable it
   rtc.disable32K();
@@ -226,18 +242,24 @@ void setup()
   else
   {
     Serial.println(F("Error initialising BH1750"));
-    errFlag += 1;
+    errFlag |= 1;
   }
-  float lux = 0;
+
   while (!lightMeter.measurementReady(true)) // Wait for measurement to be ready
-  {  
+  {
     yield();
   }
-  lux = lightMeter.readLightLevel();
-  Serial.print("Light: ");
-  Serial.print(lux);
-  Serial.println(" lx");
-
+  float lux = 0;
+  if ((errFlag & 1) == 0)
+  {
+    lux = lightMeter.readLightLevel();
+    Serial.print("Light: ");
+    Serial.print(lux);
+    Serial.println(" lx");
+  }
+  else
+    lux = 1; // if light sensor error, set lux to 1 so that it doesn't go to night mode
+  String percentStr;
   if (lux == 0)
   {
     if (!nightFlag)
@@ -249,10 +271,7 @@ void setup()
         return;
       }
       epd.Clear();
-      if (errFlag == 1)
-        showMsg("LUX ERROR");
-      else
-        showMsg("SLEEPING X_X");
+      showMsg("SLEEPING -_-");
     }
   }
   else
@@ -280,7 +299,9 @@ void setup()
     if ((daysPassed >= 15) || timeNeedsUpdate) // check if 15 days passed or force update
     {
       Serial.println("Updating time from NTP server");
-      if (autoTimeUpdate()) // Update time from NTP server
+      bool timeUpdated = autoTimeUpdate(); // Update time from NTP server
+      wifiBars = getWiFiBars();
+      if (timeUpdated)
       {
         Serial.println("Time updated");
         timeNeedsUpdate = false;
@@ -297,13 +318,14 @@ void setup()
     else
       Serial.println("Time already updated");
 
+    now = rtc.now(); // Get the current time again after potential update
+
     // Battery level handling
     float newBattLevel = batteryLevel();
     battLevel = (newBattLevel < battLevel) ? newBattLevel : ((newBattLevel - battLevel) >= battChangeThreshold || newBattLevel > battUpperLim) ? newBattLevel
                                                                                                                                                : battLevel; // Update battLevel if it has changed significantly or is above upper limit
     byte percent = constrain(((battLevel - battLow) / (battHigh - battLow)) * 100, 0, 100);                                                                 // Calculate percentage based on battHigh and battLow
 
-    String percentStr;
     if (battLevel >= 3.7) // LiFePO4 battery has max voltage of 3.6V anything larger than this means external power
       percentStr = "USB";
     else
@@ -316,9 +338,13 @@ void setup()
     String dateString = padNum(now.day()) + "/" + padNum(now.month()) + "/" + String(now.year());     // Format date string
     String timeString = padNum(tempHour) + ":" + padNum(now.minute()) + (now.isPM() ? " PM" : " AM"); // Format time string
     String week = daysOfTheWeek[now.dayOfTheWeek()];
+    String notificationMsg = "";
+
+    if (timeNeedsUpdate) // If time needs to be updated
+      notificationMsg = "TIME SYNC ERR";
 
     if (percent <= 5) // Battery level is low
-      week = "BATTERY LOW";
+      notificationMsg = "BATTERY LOW";
 
     if (epd.Init() != 0) // Initialize e-Paper display
     {
@@ -328,18 +354,16 @@ void setup()
     epd.Clear(); // Clear the display
     Serial.println("e-Paper Clear");
 
-    if (timeNeedsUpdate) // If time needs to be updated
-      showMsg("TIME SYNC");
-    else if (errFlag == 1) // If there was an error with the light sensor
-      showMsg("LUX ERROR");
+    if (errFlag == 1) // If there was an error with the light sensor
+      notificationMsg = "LUX ERROR";
     else if (errFlag == 2) // If there was an error with the RTC
-      showMsg("RTC ERROR");
+      notificationMsg = "RTC ERROR";
     else if (errFlag == 3) // If there was an error with both the light sensor and RTC
-      showMsg("LUX RTC ERROR");
-    else // Normal operation
-      showTime(week, timeString, dateString, String(battLevel) + "V", percentStr, percent /*for battery icon*/, String(padNum(temp)));
+      notificationMsg = "ALL ERROR";
+
+    showTime(week, timeString, dateString, String(battLevel) + "V", percentStr, percent /*for battery icon*/, String(padNum(temp)), notificationMsg, wifiBars);
   }
-   // Go to sleep now
+  // Go to sleep now
   Serial.println("Going to sleep now");
   Serial.flush();
   // Configure external wake-up
@@ -348,8 +372,10 @@ void setup()
   // The RTC SQW pin is active low, CHECK README for references on Deep Sleep
   rtc_gpio_pulldown_dis(CLOCK_INTERRUPT_PIN);
   rtc_gpio_pullup_en(CLOCK_INTERRUPT_PIN);
-
-  esp_deep_sleep_start(); // Enter deep sleep mode
+  if (percentStr == "USB") // if external power is connected, don't go to sleep
+    Serial.println("External power connected, staying awake");
+  else
+    esp_deep_sleep_start(); // Enter deep sleep mode
 }
 
 void loop()
@@ -357,9 +383,8 @@ void loop()
   // This will never run
 }
 
-// various error msg display function
 /**
- * @brief Displays error or status messages
+ * @brief Displays Sleep message
  * @param msg Message to display in string format
  */
 void showMsg(String msg)
@@ -385,6 +410,31 @@ void showMsg(String msg)
   Serial.println("end showMsg");
 }
 
+/**
+ * @brief Draws WiFi signal strength dots on the display, filled for connected bars and outlined for disconnected bars. If no connection, an 'x' is displayed.
+ * @param paint Paint object for drawing
+ * @param wifiBars Number of WiFi signal bars (0-5)
+ */
+void drawWiFiDots(Paint &paint, byte wifiBars)
+{
+  int x = 330;
+  int y = 8;
+
+  for (byte i = 0; i < 5; i++)
+  {
+    int dotX = x + (i * 6);
+    if (wifiBars > i)
+      paint.DrawFilledCircle(dotX, y, 2, COLORED);
+    else
+      paint.DrawCircle(dotX, y, 2, COLORED);
+  }
+
+  if (wifiBars == 0)
+  {
+    paint.DrawStringAt(x + 9, 3, "x", &Font12, COLORED);
+  }
+}
+
 // Displays time, battery info. First para is week in const char, then time in hh:mm am/pm, then date in dd/mm/yyyy, then battlevel in X.YZV, percent in XY%
 /**
  * @brief Updates display with time and status information
@@ -395,10 +445,12 @@ void showMsg(String msg)
  * @param percentStr Battery percentage string
  * @param percent Battery percentage value for icon
  * @param temp Temperature string
+ * @param notificationMsg Message shown in the notification area
+ * @param wifiBars WiFi signal level, 0 means disconnected
  * @note Implements power-efficient display update strategy
  */
 void showTime(String w, String timeString, String dateString,
-              String battLevelS, String percentStr, byte percent, String temp)
+              String battLevelS, String percentStr, byte percent, String temp, String notificationMsg, byte wifiBars)
 {
   epd.display_NUM(EPD_3IN52_WHITE);
   epd.lut_GC();
@@ -411,37 +463,46 @@ void showTime(String w, String timeString, String dateString,
   paint.SetRotate(3);           // Top right (0,0)
   paint.Clear(UNCOLORED);
 
+  int statusX = 10;
   if (percentStr != "USB")
   {
     // Battery icon outline
-    paint.DrawRectangle(10, 4, 26, 12, COLORED);
-    paint.DrawRectangle(8, 6, 10, 10, COLORED);
+    paint.DrawRectangle(statusX + 2, 4, statusX + 18, 12, COLORED);
+    paint.DrawRectangle(statusX, 6, statusX + 2, 10, COLORED);
 
     // Battery fill level
-    byte fillX = 25; // Default to empty (rightmost position)
+    byte fillX = statusX + 17; // Default to empty (rightmost position)
 
     if (percent >= 95)
-      fillX = 11; // Full
+      fillX = statusX + 3; // Full
     else if (percent >= 85)
-      fillX = 13; // Full-Med
+      fillX = statusX + 5; // Full-Med
     else if (percent >= 70)
-      fillX = 15; // Med
+      fillX = statusX + 7; // Med
     else if (percent >= 50)
-      fillX = 17; // Med-half
+      fillX = statusX + 9; // Med-half
     else if (percent >= 30)
-      fillX = 19; // Half
+      fillX = statusX + 11; // Half
     else if (percent >= 10)
-      fillX = 21; // Low-half
+      fillX = statusX + 13; // Low-half
     else if (percent >= 5)
-      fillX = 23; // Low
+      fillX = statusX + 15; // Low
     else if (percent >= 0)
-      paint.DrawStringAt(15, 2, "x", &Font12, COLORED); // Critical
+      paint.DrawStringAt(statusX + 7, 2, "x", &Font12, COLORED); // Critical
 
-    paint.DrawFilledRectangle(fillX, 4, 25, 11, COLORED);
+    paint.DrawFilledRectangle(fillX, 4, statusX + 17, 11, COLORED);
+    statusX += 28;
   }
 
-  paint.DrawStringAt(325, 5, percentStr.c_str(), &Font12, COLORED);
-  paint.DrawStringAt(280, 5, battLevelS.c_str(), &Font12, COLORED);
+  paint.DrawStringAt(statusX, 4, percentStr.c_str(), &Font12, COLORED);
+  statusX += (percentStr.length() * Font12.Width) + 8;
+  paint.DrawStringAt(statusX, 4, battLevelS.c_str(), &Font12, COLORED);
+  drawWiFiDots(paint, wifiBars);
+  if (notificationMsg.length() > 0)
+  {
+    int notificationX = (360 - (notificationMsg.length() * Font12.Width)) / 2;
+    paint.DrawStringAt(notificationX, 5, notificationMsg.c_str(), &Font12, COLORED);
+  }
   int stringWidth = w.length() * Font48.Width;
   int newStartPos = (360 - stringWidth) / 2; // Center position calculation
   paint.DrawStringAt(newStartPos, 30, w.c_str(), &Font48, COLORED);
