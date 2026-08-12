@@ -53,6 +53,8 @@ DateTime alarm1Time = DateTime(2025, 4, 6, 13, 35, 0); // Set the alarm time (ye
 // System configuration constants
 #define WIFI_CONNECT_TIMEOUT 10000 // Timeout for WiFi connection attempts (ms)
 #define BATTERY_LEVEL_SAMPLING 4   // Number of ADC samples for battery voltage averaging
+#define LIGHT_SENSOR_TIMEOUT 1000  // Max wait for light sensor reading (ms)
+#define DEBUG 0                    // Set to 1 for Serial debugging
 
 // Battery monitoring thresholds (Volts)
 #define battChangeThreshold 0.15 // Minimum voltage change to update reading (for removing fluctuations)
@@ -169,8 +171,11 @@ bool autoTimeUpdate()
                           timeClient.getMinutes(),
                           timeClient.getSeconds()));
 
-      Serial.println("RTC updated: " + String(year) + "-" +
-                     String(month) + "-" + String(day));
+      if (DEBUG)
+      {
+        Serial.println("RTC updated: " + String(year) + "-" +
+                       String(month) + "-" + String(day));
+      }
       return true;
     }
     else
@@ -196,7 +201,8 @@ String padNum(int num)
  */
 void setup()
 {
-  Serial.begin(115200);
+  if (DEBUG)
+    Serial.begin(115200);
   disableWiFi(); // Initialize peripherals with power-optimized settings
 
   pinMode(BATPIN, INPUT);
@@ -208,58 +214,82 @@ void setup()
   Preferences pref;        // preference library object
   byte errFlag = 0;        // Error flag for various error messages
   byte wifiBars = 0;       // 0 = not connected, 1-5 = signal level
+  bool rtcOK = rtc.begin();
 
-  if (!rtc.begin())
+  if (!rtcOK)
   {
-    Serial.println("Couldn't find RTC");
+    if (DEBUG)
+      Serial.println("Couldn't find RTC");
     errFlag |= 2;
-  }
-  // We don't need the 32K Pin, so disable it
-  rtc.disable32K();
-  // Set alarm 1, 2 flag to false (so alarm 1, 2 didn't happen so far)
-  // if not done, this easily leads to problems, as both register aren't reset on reboot/recompile
-  rtc.clearAlarm(1);
-  rtc.clearAlarm(2);
-  // Stop oscillating signals at SQW Pin otherwise setAlarm1 will fail
-  rtc.writeSqwPinMode(DS3231_OFF);
-  // Turn off alarm 2 (in case it isn't off already)
-  // again, this isn't done at reboot, so a previously set alarm could easily go overlooked
-  rtc.disableAlarm(2);
-  // Schedule an alarm
-  if (!rtc.setAlarm1(alarm1Time, DS3231_A1_Second))
-  { // this mode triggers the alarm when the minutes match
-    Serial.println("Error, alarm wasn't set!");
   }
   else
   {
-    Serial.println("Alarm will happen at specified time");
+    // We don't need the 32K Pin, so disable it
+    rtc.disable32K();
+    // Set alarm 1, 2 flag to false (so alarm 1, 2 didn't happen so far)
+    // if not done, this easily leads to problems, as both register aren't reset on reboot/recompile
+    rtc.clearAlarm(1);
+    rtc.clearAlarm(2);
+    // Stop oscillating signals at SQW Pin otherwise setAlarm1 will fail
+    rtc.writeSqwPinMode(DS3231_OFF);
+    // Turn off alarm 2 (in case it isn't off already)
+    // again, this isn't done at reboot, so a previously set alarm could easily go overlooked
+    rtc.disableAlarm(2);
+    // Schedule an alarm
+    if (!rtc.setAlarm1(alarm1Time, DS3231_A1_Second))
+    { // this mode triggers the alarm when the minutes match
+      if (DEBUG)
+        Serial.println("Error, alarm wasn't set!");
+    }
+    else
+    {
+      if (DEBUG)
+        Serial.println("Alarm will happen at specified time");
+    }
   }
 
   if (lightMeter.begin(BH1750::ONE_TIME_HIGH_RES_MODE))
   {
-    Serial.println(F("BH1750 Advanced begin"));
+    if (DEBUG)
+      Serial.println(F("BH1750 Advanced begin"));
   }
   else
   {
-    Serial.println(F("Error initialising BH1750"));
+    if (DEBUG)
+      Serial.println(F("Error initialising BH1750"));
     errFlag |= 1;
   }
 
-  while (!lightMeter.measurementReady(true)) // Wait for measurement to be ready
-  {
-    yield();
-  }
   float lux = 0;
   if ((errFlag & 1) == 0)
   {
-    lux = lightMeter.readLightLevel();
-    Serial.print("Light: ");
-    Serial.print(lux);
-    Serial.println(" lx");
+    unsigned long lightStart = millis();
+    while (!lightMeter.measurementReady(false) && millis() - lightStart < LIGHT_SENSOR_TIMEOUT)
+    {
+      yield();
+    }
+
+    if (lightMeter.measurementReady(false))
+    {
+      lux = lightMeter.readLightLevel();
+      if (DEBUG)
+      {
+        Serial.print("Light: ");
+        Serial.print(lux);
+        Serial.println(" lx");
+      }
+    }
+    else
+    {
+      if (DEBUG)
+        Serial.println(F("Light sensor timeout"));
+      errFlag |= 1;
+      lux = 1;
+    }
   }
   else
     lux = 1; // if light sensor error, set lux to 1 so that it doesn't go to night mode
-  String percentStr;
+  String percentStr = "";
   if (lux == 0)
   {
     if (!nightFlag)
@@ -267,58 +297,72 @@ void setup()
       nightFlag = true;
       if (epd.Init() != 0)
       {
-        Serial.println("e-Paper init failed");
+        if (DEBUG)
+          Serial.println("e-Paper init failed");
         return;
       }
       epd.Clear();
-      showMsg("SLEEPING -_-");
+      showMsg("SLEEPING o_o");
     }
   }
   else
   {
-    pref.begin("database", false); // Open Preferences with namespace "database"
     nightFlag = false;
 
-    if (!pref.isKey("timeNeedsUpdate")) // create key:value pairs
-      pref.putBool("timeNeedsUpdate", true);
-    bool timeNeedsUpdate = pref.getBool("timeNeedsUpdate", false);
+    DateTime now = DateTime(2000, 1, 1, 0, 0, 0);
+    bool timeNeedsUpdate = false;
 
-    DateTime now = rtc.now();
-    if ((now.year() == 1970) || rtc.lostPower()) // if RTC lost power or not set
-      timeNeedsUpdate = true;
-
-    // Get the current day
-    byte currentDay = now.day();
-
-    // Check if we need to update time (every 15 days)
-    if (!pref.isKey("lastCheckedDay")) // create key:value pairs
-      pref.putUChar("lastCheckedDay", 0);
-    byte lastCheckedDay = pref.getUChar("lastCheckedDay", 0);
-    byte daysPassed = (currentDay - lastCheckedDay + 31) % 31;
-
-    if ((daysPassed >= 15) || timeNeedsUpdate) // check if 15 days passed or force update
+    if (rtcOK)
     {
-      Serial.println("Updating time from NTP server");
-      bool timeUpdated = autoTimeUpdate(); // Update time from NTP server
-      wifiBars = getWiFiBars();
-      if (timeUpdated)
+      pref.begin("database", false); // Open Preferences with namespace "database"
+
+      if (!pref.isKey("timeNeedsUpdate")) // create key:value pairs
+        pref.putBool("timeNeedsUpdate", true);
+      timeNeedsUpdate = pref.getBool("timeNeedsUpdate", false);
+
+      now = rtc.now();
+      if ((now.year() == 1970) || rtc.lostPower()) // if RTC lost power or not set
+        timeNeedsUpdate = true;
+
+      // Get the current day
+      byte currentDay = now.day();
+
+      // Check if we need to update time (every 15 days)
+      if (!pref.isKey("lastCheckedDay")) // create key:value pairs
+        pref.putUChar("lastCheckedDay", 0);
+      byte lastCheckedDay = pref.getUChar("lastCheckedDay", 0);
+      byte daysPassed = (currentDay - lastCheckedDay + 31) % 31;
+
+      if ((daysPassed >= 15) || timeNeedsUpdate) // check if 15 days passed or force update
       {
-        Serial.println("Time updated");
-        timeNeedsUpdate = false;
+        if (DEBUG)
+          Serial.println("Updating time from NTP server");
+        bool timeUpdated = autoTimeUpdate(); // Update time from NTP server
+        wifiBars = getWiFiBars();
+        if (timeUpdated)
+        {
+          if (DEBUG)
+            Serial.println("Time updated");
+          timeNeedsUpdate = false;
+        }
+        else
+        {
+          if (DEBUG)
+            Serial.println("Time Not updated");
+        }
+        disableWiFi(); // Turn off WiFi to save power
+        pref.putBool("timeNeedsUpdate", timeNeedsUpdate);
+        pref.putUChar("lastCheckedDay", currentDay); // Update last checked day
       }
       else
       {
-        Serial.println("Time Not updated");
+        if (DEBUG)
+          Serial.println("Time already updated");
       }
-      disableWiFi(); // Turn off WiFi to save power
-      pref.putBool("timeNeedsUpdate", timeNeedsUpdate);
-      pref.putUChar("lastCheckedDay", currentDay); // Update last checked day
-      pref.end();                                  // Close the preferences
-    }
-    else
-      Serial.println("Time already updated");
 
-    now = rtc.now(); // Get the current time again after potential update
+      pref.end();      // Close the preferences
+      now = rtc.now(); // Get the current time again after potential update
+    }
 
     // Battery level handling
     float newBattLevel = batteryLevel();
@@ -331,14 +375,22 @@ void setup()
     else
       percentStr = String(percent) + "%";
 
-    byte tempHour = now.twelveHour(); // Get the hour in 12-hour format
-
-    byte temp = int(rtc.getTemperature()); // Get the temperature in Celsius, rounded to the nearest integer
-
-    String dateString = padNum(now.day()) + "/" + padNum(now.month()) + "/" + String(now.year());     // Format date string
-    String timeString = padNum(tempHour) + ":" + padNum(now.minute()) + (now.isPM() ? " PM" : " AM"); // Format time string
-    String week = daysOfTheWeek[now.dayOfTheWeek()];
+    String dateString = "--/--/----";
+    String timeString = "--:--";
+    String tempString = "--";
+    String week = "CLOCK";
     String notificationMsg = "";
+
+    if (rtcOK)
+    {
+      byte tempHour = now.twelveHour();      // Get the hour in 12-hour format
+      byte temp = int(rtc.getTemperature()); // Get the temperature in Celsius, rounded to the nearest integer
+
+      dateString = padNum(now.day()) + "/" + padNum(now.month()) + "/" + String(now.year());     // Format date string
+      timeString = padNum(tempHour) + ":" + padNum(now.minute()) + (now.isPM() ? " PM" : " AM"); // Format time string
+      tempString = String(padNum(temp));
+      week = daysOfTheWeek[now.dayOfTheWeek()];
+    }
 
     if (timeNeedsUpdate) // If time needs to be updated
       notificationMsg = "TIME SYNC ERR";
@@ -348,11 +400,12 @@ void setup()
 
     if (epd.Init() != 0) // Initialize e-Paper display
     {
-      Serial.println("e-Paper init failed");
+      if (DEBUG)
+        Serial.println("e-Paper init failed");
       return;
     }
-    epd.Clear(); // Clear the display
-    Serial.println("e-Paper Clear");
+    if (DEBUG)
+      Serial.println("e-Paper initialized");
 
     if (errFlag == 1) // If there was an error with the light sensor
       notificationMsg = "LUX ERROR";
@@ -360,12 +413,15 @@ void setup()
       notificationMsg = "RTC ERROR";
     else if (errFlag == 3) // If there was an error with both the light sensor and RTC
       notificationMsg = "ALL ERROR";
-
-    showTime(week, timeString, dateString, String(battLevel) + "V", percentStr, percent /*for battery icon*/, String(padNum(temp)), notificationMsg, wifiBars);
+    epd.Clear();
+    showTime(week, timeString, dateString, String(battLevel) + "V", percentStr, percent /*for battery icon*/, tempString, notificationMsg, wifiBars);
   }
   // Go to sleep now
-  Serial.println("Going to sleep now");
-  Serial.flush();
+  if (DEBUG)
+  {
+    Serial.println("Going to sleep now");
+    Serial.flush();
+  }
   // Configure external wake-up
   esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK(CLOCK_INTERRUPT_PIN), ESP_EXT1_WAKEUP_ANY_LOW);
   // Configure pullup/downs via RTCIO to tie wakeup pins to inactive level during deepsleep.
@@ -373,7 +429,10 @@ void setup()
   rtc_gpio_pulldown_dis(CLOCK_INTERRUPT_PIN);
   rtc_gpio_pullup_en(CLOCK_INTERRUPT_PIN);
   if (percentStr == "USB") // if external power is connected, don't go to sleep
-    Serial.println("External power connected, staying awake");
+  {
+    if (DEBUG)
+      Serial.println("External power connected, staying awake");
+  }
   else
     esp_deep_sleep_start(); // Enter deep sleep mode
 }
@@ -404,10 +463,12 @@ void showMsg(String msg)
   epd.display_part(paint.GetImage(), 0, 0, paint.GetWidth(), paint.GetHeight());
   epd.lut_GC();
   epd.refresh();
-  Serial.println("sleep......");
+  if (DEBUG)
+    Serial.println("sleep......");
   delay(100);
   epd.sleep();
-  Serial.println("end showMsg");
+  if (DEBUG)
+    Serial.println("end showMsg");
 }
 
 /**
@@ -519,8 +580,10 @@ void showTime(String w, String timeString, String dateString,
   epd.display_part(paint.GetImage(), 0, 0, paint.GetWidth(), paint.GetHeight());
   epd.lut_GC();
   epd.refresh();
-  Serial.println("sleep......");
+  if (DEBUG)
+    Serial.println("sleep......");
   delay(100);
   epd.sleep();
-  Serial.println("end");
+  if (DEBUG)
+    Serial.println("end");
 }
