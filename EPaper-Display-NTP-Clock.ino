@@ -57,7 +57,7 @@ DateTime alarm1Time = DateTime(2025, 4, 6, 13, 35, 0); // Set the alarm time (ye
 #define WIFI_CONNECT_TIMEOUT 10000 // Timeout for WiFi connection attempts (ms)
 #define BATTERY_LEVEL_SAMPLING 4   // Number of ADC samples for battery voltage averaging
 #define LIGHT_SENSOR_TIMEOUT 1000  // Max wait for light sensor reading (ms)
-#define DEBUG 1                    // Set to 1 for Serial debugging
+bool DEBUG = false;                // Set to 1 for Serial debugging
 
 // Battery monitoring thresholds (Volts)
 #define battChangeThreshold 0.15 // Minimum voltage change to update reading (for removing fluctuations)
@@ -170,7 +170,6 @@ void saveWiFiCredentials(String newSsid, String newPassword)
 void loadSettings()
 {
   pref.begin("database", false);
-  showBattery = pref.getBool("showBattery", true);
   float tzOffset = pref.getFloat("timeZone", 5.5);
   ntpPoolServer = pref.getString("ntpPool", "in.pool.ntp.org");
   customNtpServer = pref.getString("customNtp", "");
@@ -329,7 +328,8 @@ void startSettingsServer()
 {
   if (settingsServerRunning)
     return;
-  enableWiFi();
+  if (!enableWiFi())
+    return;
   if (DEBUG)
     Serial.println("[Settings] Starting settings server...");
 
@@ -495,16 +495,25 @@ float batteryLevel()
 }
 
 /**
- * @brief Enables WiFi with power-optimized settings
- * @note Includes timeout and CPU frequency management
+ * @brief Enables WiFi and attempts to connect with saved credentials
+ * If the connection fails due to wrong password, it clears the credentials
+ * and sets a flag for the device to reboot into WiFi Manager mode.
  */
-void enableWiFi()
+bool enableWiFi()
 {
-  if (ssid.length() == 0 || password.length() == 0)
+  if (!LittleFS.begin(true))
+  {
+    Serial.println("LittleFS mount failed");
+  }
+
+  loadWiFiCredentials();
+  if (ssid == "" || password == "")
   {
     if (DEBUG)
-      Serial.println("[WiFi] No credentials - skipping WiFi enable");
-    return;
+      Serial.println("[WiFi] No credentials - Starting WiFi Manager");
+
+    startWiFiManager();
+    return false;
   }
 
   if (DEBUG)
@@ -574,7 +583,7 @@ void enableWiFi()
     restartPending = true;
     restartAt = millis() + 3000;
 
-    return;
+    return false;
   }
 
   if (WiFi.status() != WL_CONNECTED)
@@ -582,6 +591,7 @@ void enableWiFi()
     if (DEBUG)
       Serial.println("[WiFi] Connection timeout - disabling WiFi");
     disableWiFi();
+    return false;
   }
   else
   {
@@ -590,6 +600,7 @@ void enableWiFi()
     {
       Serial.print("[WiFi] Connected! IP address: ");
       Serial.println(WiFi.localIP());
+      return true;
     }
   }
 }
@@ -615,7 +626,9 @@ void disableWiFi()
  */
 bool autoTimeUpdate()
 {
-  enableWiFi();
+  if (!enableWiFi()) // If WiFi cannot be enabled, return false
+    return false;
+
   if (WiFi.status() == WL_CONNECTED)
   {
     // Update NTP client with current settings
@@ -668,39 +681,29 @@ String padNum(int num)
  */
 void setup()
 {
-  if (DEBUG)
-    Serial.begin(115200);
-
-  if (!LittleFS.begin(true))
-  {
-    Serial.println("LittleFS mount failed");
-  }
-
-  loadWiFiCredentials();
-  loadSettings(); // Load user settings from NVS
-
-  // Check if previous wrong password flag is set
-  if (wrongPasswordFlag)
-  {
-    if (DEBUG)
-      Serial.println("[Setup] Wrong password flag detected from previous boot - starting WiFi Manager");
-    wrongPasswordFlag = false;
-    startWiFiManager();
-    return;
-  }
-
-  if (ssid == "" || password == "")
-  {
-    startWiFiManager();
-    return;
-  }
-
-  disableWiFi(); // Initialize peripherals with power-optimized settings
-
   pinMode(BATPIN, INPUT);
   Wire.begin();
   Wire.setClock(400000);    // Set I2C clock speed to 400kHz
   analogReadResolution(12); // Set ADC resolution to 12 bits
+  String powerStatusStr = "";
+  // Battery level handling
+  float newBattLevel = batteryLevel();
+  battLevel = (newBattLevel < battLevel) ? newBattLevel : ((newBattLevel - battLevel) >= battChangeThreshold || newBattLevel > battUpperLim) ? newBattLevel
+                                                                                                                                             : battLevel; // Update battLevel if it has changed significantly or is above upper limit
+  byte percent = constrain(((battLevel - battLow) / (battHigh - battLow)) * 100, 0, 100);                                                                 // Calculate percentage based on battHigh and battLow
+
+  if (battLevel >= 3.7) // LiFePO4 battery has max voltage of 3.6V anything larger than this means external power
+  {
+    powerStatusStr = "USB";
+    DEBUG = true;
+  }
+  else
+    powerStatusStr = String(percent) + "%";
+
+  if (DEBUG)
+    Serial.begin(115200);
+
+  disableWiFi(); // Initialize peripherals with power-optimized settings
 
   BH1750 lightMeter(0x23); // Initalize light sensor
   Preferences pref;        // preference library object
@@ -781,7 +784,7 @@ void setup()
   }
   else
     lux = 1; // if light sensor error, set lux to 1 so that it doesn't go to night mode
-  String percentStr = "";
+
   if (lux == 0)
   {
     if (!nightFlag)
@@ -801,19 +804,30 @@ void setup()
   {
     nightFlag = false;
 
+    // Check if previous wrong password flag is set
+    if (wrongPasswordFlag)
+    {
+      if (DEBUG)
+        Serial.println("[Setup] Wrong password flag detected from previous boot - starting WiFi Manager");
+      wrongPasswordFlag = false;
+      startWiFiManager();
+      return;
+    }
+
     DateTime now = DateTime(2000, 1, 1, 0, 0, 0);
     bool timeNeedsUpdate = false;
 
     if (rtcOK)
     {
-      pref.begin("database", false); // Open Preferences with namespace "database"
+      pref.begin("database", false);                   // Open Preferences with namespace "database"
+      showBattery = pref.getBool("showBattery", true); // Load user setting for battery display
 
       if (!pref.isKey("timeNeedsUpdate")) // create key:value pairs
         pref.putBool("timeNeedsUpdate", true);
       timeNeedsUpdate = pref.getBool("timeNeedsUpdate", false);
 
       now = rtc.now();
-      if ((now.year() == 1970) || rtc.lostPower()) // if RTC lost power or not set
+      if ((now.year() < 2025) || rtc.lostPower()) // Check if RTC time is invalid or lost power
         timeNeedsUpdate = true;
 
       // Get the current day
@@ -829,6 +843,13 @@ void setup()
       {
         if (DEBUG)
           Serial.println("Updating time from NTP server");
+
+        if (!LittleFS.begin(true))
+        {
+          Serial.println("LittleFS mount failed");
+        }
+        loadSettings(); // Load user settings from NVS
+
         bool timeUpdated = autoTimeUpdate(); // Update time from NTP server
 
         // Check if restart is pending (wrong password detected in enableWiFi)
@@ -839,7 +860,6 @@ void setup()
           return; // Exit setup early to reach loop()
         }
 
-        wifiBars = getWiFiBars();
         if (timeUpdated)
         {
           if (DEBUG)
@@ -867,22 +887,12 @@ void setup()
       now = rtc.now(); // Get the current time again after potential update
     }
 
-    // Battery level handling
-    float newBattLevel = batteryLevel();
-    battLevel = (newBattLevel < battLevel) ? newBattLevel : ((newBattLevel - battLevel) >= battChangeThreshold || newBattLevel > battUpperLim) ? newBattLevel
-                                                                                                                                               : battLevel; // Update battLevel if it has changed significantly or is above upper limit
-    byte percent = constrain(((battLevel - battLow) / (battHigh - battLow)) * 100, 0, 100);                                                                 // Calculate percentage based on battHigh and battLow
-
-    if (battLevel >= 3.7) // LiFePO4 battery has max voltage of 3.6V anything larger than this means external power
-      percentStr = "USB";
-    else
-      percentStr = String(percent) + "%";
-
     String dateString = "--/--/----";
     String timeString = "--:--";
     String tempString = "--";
     String week = "CLOCK";
     String notificationMsg = "";
+    wifiBars = getWiFiBars();
 
     if (rtcOK)
     {
@@ -917,24 +927,17 @@ void setup()
     else if (errFlag == 3) // If there was an error with both the light sensor and RTC
       notificationMsg = "ALL ERROR";
     epd.Clear();
-    showTime(week, timeString, dateString, String(battLevel) + "V", percentStr, percent /*for battery icon*/, tempString, notificationMsg, wifiBars);
+    showTime(week, timeString, dateString, String(battLevel) + "V", powerStatusStr, percent /*for battery icon*/, tempString, notificationMsg, wifiBars);
   }
   // Go to sleep now
-  if (DEBUG)
-  {
-    Serial.print("[Setup] About to check sleep condition: restartPending=");
-    Serial.print(restartPending);
-    Serial.print(", percentStr=");
-    Serial.println(percentStr);
-    Serial.flush();
-  }
+
   // Configure external wake-up
   esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK(CLOCK_INTERRUPT_PIN), ESP_EXT1_WAKEUP_ANY_LOW);
   // Configure pullup/downs via RTCIO to tie wakeup pins to inactive level during deepsleep.
   // The RTC SQW pin is active low, CHECK README for references on Deep Sleep
   rtc_gpio_pulldown_dis(CLOCK_INTERRUPT_PIN);
   rtc_gpio_pullup_en(CLOCK_INTERRUPT_PIN);
-  if (percentStr == "USB") // if external power is connected or restart pending, don't go to sleep
+  if (powerStatusStr == "USB") // if external power is connected or restart pending, don't go to sleep
   {
     if (DEBUG)
     {
@@ -950,7 +953,7 @@ void loop()
   // Start settings server once when USB power is detected
   if (!settingsServerRunning)
   {
-    delay(100); // Small delay to ensure system is ready
+    delay(1000); // Small delay to ensure system is ready
     startSettingsServer();
   }
 
@@ -1063,7 +1066,7 @@ void drawWiFiDots(Paint &paint, byte wifiBars)
  * @param timeString Formatted time string
  * @param dateString Formatted date string
  * @param battLevelS Battery voltage string
- * @param percentStr Battery percentage string
+ * @param powerStatusStr Battery percentage string
  * @param percent Battery percentage value for icon
  * @param temp Temperature string
  * @param notificationMsg Message shown in the notification area
@@ -1071,7 +1074,7 @@ void drawWiFiDots(Paint &paint, byte wifiBars)
  * @note Implements power-efficient display update strategy
  */
 void showTime(String w, String timeString, String dateString,
-              String battLevelS, String percentStr, byte percent, String temp, String notificationMsg, byte wifiBars)
+              String battLevelS, String powerStatusStr, byte percent, String temp, String notificationMsg, byte wifiBars)
 {
   epd.display_NUM(EPD_3IN52_WHITE);
   epd.lut_GC();
@@ -1085,7 +1088,7 @@ void showTime(String w, String timeString, String dateString,
   paint.Clear(UNCOLORED);
 
   int statusX = 10;
-  if (percentStr != "USB")
+  if (powerStatusStr != "USB")
   {
     // Battery icon outline
     paint.DrawRectangle(statusX + 2, 4, statusX + 18, 12, COLORED);
@@ -1115,8 +1118,8 @@ void showTime(String w, String timeString, String dateString,
     statusX += 28;
   }
 
-  paint.DrawStringAt(statusX, 4, percentStr.c_str(), &Font12, COLORED);
-  statusX += (percentStr.length() * Font12.Width) + 8;
+  paint.DrawStringAt(statusX, 4, powerStatusStr.c_str(), &Font12, COLORED);
+  statusX += (powerStatusStr.length() * Font12.Width) + 8;
 
   // Only display battery voltage if setting is enabled
   if (showBattery)
