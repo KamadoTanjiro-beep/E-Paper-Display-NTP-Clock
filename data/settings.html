@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E-Paper Clock Settings</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            color: #333;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        input[type="password"],
+        select {
+            width: 100%;
+            padding: 12px 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+            font-family: inherit;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        input[type="password"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            accent-color: #667eea;
+        }
+
+        .checkbox-group label {
+            margin-bottom: 0;
+            cursor: pointer;
+        }
+
+        .form-section {
+            margin-bottom: 35px;
+            padding-bottom: 25px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .form-section:last-of-type {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .section-title {
+            color: #667eea;
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-top: 20px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .status {
+            text-align: center;
+            margin-top: 20px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            display: block;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            display: block;
+        }
+
+        .help-text {
+            color: #999;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>⚙️ Settings</h1>
+        <p class="subtitle">E-Paper NTP Clock Configuration</p>
+
+        <form id="settingsForm">
+            <!-- Display Settings -->
+            <div class="form-section">
+                <div class="section-title">Display</div>
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="showBattery" name="showBattery">
+                        <label for="showBattery">Show Battery Voltage</label>
+                    </div>
+                    <div class="help-text">Display battery voltage on the e-paper screen</div>
+                </div>
+            </div>
+
+            <!-- WiFi Settings -->
+            <div class="form-section">
+                <div class="section-title">WiFi</div>
+                <div class="form-group">
+                    <label for="ssid">SSID</label>
+                    <input type="text" id="ssid" name="ssid" placeholder="WiFi network name">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="WiFi password">
+                    <div class="help-text">Leave blank to keep current password unchanged</div>
+                </div>
+            </div>
+
+            <!-- Time Settings -->
+            <div class="form-section">
+                <div class="section-title">Time</div>
+                <div class="form-group">
+                    <label for="timezone">Timezone (Offset in hours)</label>
+                    <input type="number" id="timezone" name="timezone" step="0.5" placeholder="e.g., 5.5 for IST">
+                    <div class="help-text">Example: 5.5 for India (IST), -5 for EST, 0 for GMT</div>
+                </div>
+                <div class="form-group">
+                    <label for="poolServer">NTP Pool Server</label>
+                    <select id="poolServer" name="poolServer">
+                        <option value="pool.ntp.org">pool.ntp.org</option>
+                        <option value="time.nist.gov">time.nist.gov</option>
+                        <option value="time.google.com">time.google.com</option>
+                        <option value="time.cloudflare.com">time.cloudflare.com</option>
+                        <option value="in.pool.ntp.org">in.pool.ntp.org (India)</option>
+                        <option value="custom">Custom (enter below)</option>
+                    </select>
+                </div>
+                <div class="form-group" id="customServerGroup" style="display: none;">
+                    <label for="customServer">Custom NTP Server</label>
+                    <input type="text" id="customServer" name="customServer" placeholder="e.g., time.example.com">
+                </div>
+            </div>
+
+            <button type="submit">Save Settings</button>
+            <button type="button" id="rebootBtn"
+                style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); margin-top: 10px;">Reboot
+                Device</button>
+        </form>
+
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        const poolSelect = document.getElementById('poolServer');
+        const customGroup = document.getElementById('customServerGroup');
+        const form = document.getElementById('settingsForm');
+        const statusDiv = document.getElementById('status');
+
+        // Toggle custom server input
+        poolSelect.addEventListener('change', () => {
+            customGroup.style.display = poolSelect.value === 'custom' ? 'block' : 'none';
+        });
+
+        // Load current settings
+        async function loadSettings() {
+            try {
+                const response = await fetch('/api/settings');
+                const data = await response.json();
+
+                document.getElementById('showBattery').checked = data.showBattery || false;
+                document.getElementById('ssid').value = data.ssid || '';
+                document.getElementById('password').value = data.password || '';
+                document.getElementById('timezone').value = data.timezone || 5.5;
+                document.getElementById('poolServer').value = data.poolServer || 'pool.ntp.org';
+                document.getElementById('customServer').value = data.customServer || '';
+
+                // Show custom server input if needed
+                if (document.getElementById('poolServer').value === 'custom') {
+                    customGroup.style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error loading settings:', error);
+            }
+        }
+
+        // Save settings
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const settings = {
+                showBattery: document.getElementById('showBattery').checked,
+                ssid: document.getElementById('ssid').value.trim(),
+                password: document.getElementById('password').value.trim(),
+                timezone: parseFloat(document.getElementById('timezone').value) || 5.5,
+                poolServer: document.getElementById('poolServer').value,
+                customServer: document.getElementById('customServer').value.trim()
+            };
+
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(settings)
+                });
+
+                if (response.ok) {
+                    statusDiv.className = 'status success';
+                    statusDiv.textContent = '✓ Settings saved successfully!';
+                    setTimeout(() => {
+                        statusDiv.className = 'status';
+                    }, 3000);
+                } else {
+                    statusDiv.className = 'status error';
+                    statusDiv.textContent = '✗ Error saving settings';
+                }
+            } catch (error) {
+                statusDiv.className = 'status error';
+                statusDiv.textContent = '✗ Network error: ' + error.message;
+                console.error('Error saving settings:', error);
+            }
+        });
+
+        // Load settings when page loads
+        loadSettings();
+
+        // Reboot button handler
+        const rebootBtn = document.getElementById('rebootBtn');
+        let rebootInProgress = false;
+
+        rebootBtn.addEventListener('click', async () => {
+            if (rebootInProgress) return; // Prevent double-click
+
+            if (confirm('Are you sure you want to reboot the device?\n\nIt will restart in 3 seconds.')) {
+                rebootInProgress = true;
+                try {
+                    const response = await fetch('/api/reboot', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({})
+                    });
+
+                    if (response.ok) {
+                        statusDiv.className = 'status success';
+                        statusDiv.textContent = '✓ Device rebooting in 3 seconds...';
+                        rebootBtn.disabled = true;
+
+                        // Re-enable button after device has rebooted and come back online
+                        setTimeout(() => {
+                            rebootBtn.disabled = false;
+                            rebootInProgress = false;
+                            statusDiv.textContent = '✓ Device rebooted successfully! Page will refresh when device is back online.';
+                        }, 15000); // 15 seconds should be enough for reboot
+                    } else {
+                        statusDiv.className = 'status error';
+                        statusDiv.textContent = '✗ Error initiating reboot';
+                        rebootInProgress = false; // Allow retry
+                    }
+                } catch (error) {
+                    statusDiv.className = 'status error';
+                    statusDiv.textContent = '✗ Network error: ' + error.message;
+                    console.error('Error rebooting:', error);
+                    rebootInProgress = false; // Allow retry
+                }
+            }
+        });
+    </script>
+</body>
+
+</html>

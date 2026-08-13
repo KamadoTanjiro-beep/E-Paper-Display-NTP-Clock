@@ -80,6 +80,13 @@ NTPClient timeClient(ntpUDP, "in.pool.ntp.org", 19800); // 19800 is offset of In
 AsyncWebServer server(80);
 Preferences pref;
 
+// Settings variables
+bool showBattery = true;
+float timeZoneOffset = 19800; // Default: IST (5.5 hours = 19800 seconds)
+String ntpPoolServer = "in.pool.ntp.org";
+String customNtpServer = "";
+volatile bool settingsServerRunning = false;
+
 // Weekday names for display
 static const char daysOfTheWeek[7][10] PROGMEM = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 #define COLORED 0   // 0 is black
@@ -155,6 +162,60 @@ void saveWiFiCredentials(String newSsid, String newPassword)
   pref.end();
   if (DEBUG)
     Serial.println("[WiFi] Credentials saved successfully");
+}
+
+/**
+ * @brief Load settings from NVS storage
+ */
+void loadSettings()
+{
+  pref.begin("database", false);
+  showBattery = pref.getBool("showBattery", true);
+  float tzOffset = pref.getFloat("timeZone", 5.5);
+  ntpPoolServer = pref.getString("ntpPool", "in.pool.ntp.org");
+  customNtpServer = pref.getString("customNtp", "");
+
+  // Update timeZoneOffset in seconds
+  timeZoneOffset = (long)(tzOffset * 3600);
+
+  if (DEBUG)
+  {
+    Serial.print("[Settings] Loaded - showBattery: ");
+    Serial.print(showBattery);
+    Serial.print(", timezone: ");
+    Serial.print(tzOffset);
+    Serial.print("h, pool: ");
+    Serial.println(ntpPoolServer);
+  }
+  pref.end();
+}
+
+/**
+ * @brief Save settings to NVS storage
+ */
+void saveSettings(bool showBatt, float tzHours, String poolServer, String customServer)
+{
+  pref.begin("database", false);
+  pref.putBool("showBattery", showBatt);
+  pref.putFloat("timeZone", tzHours);
+  pref.putString("ntpPool", poolServer);
+  pref.putString("customNtp", customServer);
+  pref.end();
+
+  showBattery = showBatt;
+  timeZoneOffset = (long)(tzHours * 3600);
+  ntpPoolServer = poolServer;
+  customNtpServer = customServer;
+
+  if (DEBUG)
+  {
+    Serial.print("[Settings] Saved - showBattery: ");
+    Serial.print(showBatt);
+    Serial.print(", timezone: ");
+    Serial.print(tzHours);
+    Serial.print("h, pool: ");
+    Serial.println(poolServer);
+  }
 }
 
 void startWiFiManager()
@@ -259,6 +320,140 @@ void startWiFiManager()
   server.begin();
   if (DEBUG)
     Serial.println("[WiFi] AsyncWebServer started on port 80");
+}
+
+/**
+ * @brief Start settings web server for USB power mode
+ */
+void startSettingsServer()
+{
+  if (settingsServerRunning)
+    return;
+  enableWiFi();
+  if (DEBUG)
+    Serial.println("[Settings] Starting settings server...");
+
+  // Serve settings.html
+  server.on("/settings", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (DEBUG)
+      Serial.println("[Settings] GET /settings");
+    request->send(LittleFS, "/settings.html", "text/html"); });
+
+  // Serve settings API - GET current settings
+  server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    String json = "{";
+    json += "\"showBattery\":" + String(showBattery ? "true" : "false") + ",";
+    json += "\"ssid\":\"" + ssid + "\",";
+    json += "\"password\":\"\","; // Don't send password for security
+    json += "\"timezone\":" + String(timeZoneOffset / 3600.0) + ",";
+    json += "\"poolServer\":\"" + ntpPoolServer + "\",";
+    json += "\"customServer\":\"" + customNtpServer + "\"";
+    json += "}";
+    request->send(200, "application/json", json); });
+
+  // Serve settings API - POST to update settings
+  server.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+            {
+    if (DEBUG)
+      Serial.println("[Settings] POST /api/settings");
+
+    // Parse JSON payload - simple parsing without external library
+    String payload = String((char *)data).substring(0, len);
+    
+    bool newShowBattery = showBattery;
+    float newTimezone = timeZoneOffset / 3600.0;
+    String newPoolServer = ntpPoolServer;
+    String newCustomServer = customNtpServer;
+    String newSSID = ssid;
+    String newPassword = password;
+
+    // Extract values from JSON (simple approach)
+    if (payload.indexOf("\"showBattery\":true") >= 0)
+      newShowBattery = true;
+    else if (payload.indexOf("\"showBattery\":false") >= 0)
+      newShowBattery = false;
+
+    // Extract timezone
+    int tzIndex = payload.indexOf("\"timezone\":");
+    if (tzIndex >= 0)
+    {
+      int tzEnd = payload.indexOf(",", tzIndex);
+      if (tzEnd < 0)
+        tzEnd = payload.indexOf("}", tzIndex);
+      String tzStr = payload.substring(tzIndex + 11, tzEnd);
+      newTimezone = tzStr.toFloat();
+    }
+
+    // Extract pool server
+    int poolIndex = payload.indexOf("\"poolServer\":\"");
+    if (poolIndex >= 0)
+    {
+      int poolEnd = payload.indexOf("\"", poolIndex + 14);
+      newPoolServer = payload.substring(poolIndex + 14, poolEnd);
+    }
+
+    // Extract custom server
+    int custIndex = payload.indexOf("\"customServer\":\"");
+    if (custIndex >= 0)
+    {
+      int custEnd = payload.indexOf("\"", custIndex + 16);
+      newCustomServer = payload.substring(custIndex + 16, custEnd);
+    }
+
+    // Extract SSID
+    int ssidIndex = payload.indexOf("\"ssid\":\"");
+    if (ssidIndex >= 0)
+    {
+      int ssidEnd = payload.indexOf("\"", ssidIndex + 8);
+      newSSID = payload.substring(ssidIndex + 8, ssidEnd);
+    }
+
+    // Extract password
+    int passIndex = payload.indexOf("\"password\":\"");
+    if (passIndex >= 0)
+    {
+      int passEnd = payload.indexOf("\"", passIndex + 12);
+      newPassword = payload.substring(passIndex + 12, passEnd);
+    }
+
+    // Save settings
+    saveSettings(newShowBattery, newTimezone, newPoolServer, newCustomServer);
+
+    // Mark RTC time for update since NTP settings changed
+    pref.begin("database", false);
+    pref.putBool("timeNeedsUpdate", true);
+    pref.end();
+    
+    if (DEBUG)
+      Serial.println("[Settings] Set timeNeedsUpdate flag - RTC will be synced on next boot");
+
+    // Save WiFi credentials only if BOTH SSID and password are provided
+    if (newSSID.length() > 0 && newPassword.length() > 0)
+    {
+      if (DEBUG)
+        Serial.println("[Settings] Updating WiFi credentials from settings page");
+      saveWiFiCredentials(newSSID, newPassword);
+    }
+
+    request->send(200, "application/json", "{\"status\":\"success\"}"); });
+
+  // Serve reboot API - POST to reboot device
+  server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *request)
+            {
+    if (DEBUG)
+      Serial.println("[Settings] POST /api/reboot - Device reboot requested");
+    
+    restartPending = true;
+    restartAt = millis() + 3000;
+    
+    request->send(200, "application/json", "{\"status\":\"rebooting\"}"); });
+
+  server.begin();
+  settingsServerRunning = true;
+  if (DEBUG)
+    Serial.println("[Settings] Settings server started on port 80");
 }
 
 /**
@@ -388,6 +583,15 @@ void enableWiFi()
       Serial.println("[WiFi] Connection timeout - disabling WiFi");
     disableWiFi();
   }
+  else
+  {
+    // WiFi successfully connected
+    if (DEBUG)
+    {
+      Serial.print("[WiFi] Connected! IP address: ");
+      Serial.println(WiFi.localIP());
+    }
+  }
 }
 
 /**
@@ -414,6 +618,11 @@ bool autoTimeUpdate()
   enableWiFi();
   if (WiFi.status() == WL_CONNECTED)
   {
+    // Update NTP client with current settings
+    String ntpServer = (ntpPoolServer == "custom") ? customNtpServer : ntpPoolServer;
+    timeClient.setPoolServerName(ntpServer.c_str());
+    timeClient.setTimeOffset(timeZoneOffset);
+
     timeClient.begin();
     if (timeClient.update() && timeClient.isTimeSet())
     {
@@ -468,6 +677,7 @@ void setup()
   }
 
   loadWiFiCredentials();
+  loadSettings(); // Load user settings from NVS
 
   // Check if previous wrong password flag is set
   if (wrongPasswordFlag)
@@ -724,14 +934,11 @@ void setup()
   // The RTC SQW pin is active low, CHECK README for references on Deep Sleep
   rtc_gpio_pulldown_dis(CLOCK_INTERRUPT_PIN);
   rtc_gpio_pullup_en(CLOCK_INTERRUPT_PIN);
-  if (percentStr == "USB" || restartPending) // if external power is connected or restart pending, don't go to sleep
+  if (percentStr == "USB") // if external power is connected or restart pending, don't go to sleep
   {
     if (DEBUG)
     {
-      if (restartPending)
-        Serial.println("[Setup] Restart pending, staying awake to allow reboot");
-      else
-        Serial.println("External power connected, staying awake");
+      Serial.println("External power connected, staying awake");
     }
   }
   else
@@ -740,9 +947,17 @@ void setup()
 
 void loop()
 {
-  restartWhenReady();
-}
+  // Start settings server once when USB power is detected
+  if (!settingsServerRunning)
+  {
+    delay(100); // Small delay to ensure system is ready
+    startSettingsServer();
+  }
 
+  restartWhenReady();
+  yield();
+  delay(100);
+}
 /**
  * @brief Displays a detailed setup message using the smallest notification font.
  * @param msg Message to display in string format
@@ -902,7 +1117,12 @@ void showTime(String w, String timeString, String dateString,
 
   paint.DrawStringAt(statusX, 4, percentStr.c_str(), &Font12, COLORED);
   statusX += (percentStr.length() * Font12.Width) + 8;
-  paint.DrawStringAt(statusX, 4, battLevelS.c_str(), &Font12, COLORED);
+
+  // Only display battery voltage if setting is enabled
+  if (showBattery)
+  {
+    paint.DrawStringAt(statusX, 4, battLevelS.c_str(), &Font12, COLORED);
+  }
   drawWiFiDots(paint, wifiBars);
   if (notificationMsg.length() > 0)
   {
