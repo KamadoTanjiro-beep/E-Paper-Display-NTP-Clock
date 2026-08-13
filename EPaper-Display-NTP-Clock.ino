@@ -26,7 +26,9 @@ Copyright (C) 2024-2025 desiFish
 #include "driver/rtc_io.h" // RTC GPIO library for deep sleep external wakeup
 
 #include <WiFi.h>
-
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <LittleFS.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
@@ -40,8 +42,9 @@ Copyright (C) 2024-2025 desiFish
 #define BUTTON_PIN_BITMASK(GPIO7) (1ULL << GPIO7) // 2 ^ GPIO_NUMBER in hex
 #define CLOCK_INTERRUPT_PIN GPIO_NUM_7            // GPIO 7
 
-RTC_DATA_ATTR bool nightFlag = false; // RTC_DATA_ATTR keeps the variable in RTC memory, so it survives deep sleep
-RTC_DATA_ATTR float battLevel = 0.0;  // RTC_DATA_ATTR keeps the variable in RTC memory, so it survives deep sleep
+RTC_DATA_ATTR bool nightFlag = false;         // RTC_DATA_ATTR keeps the variable in RTC memory, so it survives deep sleep
+RTC_DATA_ATTR float battLevel = 0.0;          // RTC_DATA_ATTR keeps the variable in RTC memory, so it survives deep sleep
+RTC_DATA_ATTR bool wrongPasswordFlag = false; // Flag to track wrong password across reboots
 
 RTC_DS3231 rtc; // ds3231 object
 
@@ -54,7 +57,7 @@ DateTime alarm1Time = DateTime(2025, 4, 6, 13, 35, 0); // Set the alarm time (ye
 #define WIFI_CONNECT_TIMEOUT 10000 // Timeout for WiFi connection attempts (ms)
 #define BATTERY_LEVEL_SAMPLING 4   // Number of ADC samples for battery voltage averaging
 #define LIGHT_SENSOR_TIMEOUT 1000  // Max wait for light sensor reading (ms)
-#define DEBUG 0                    // Set to 1 for Serial debugging
+#define DEBUG 1                    // Set to 1 for Serial debugging
 
 // Battery monitoring thresholds (Volts)
 #define battChangeThreshold 0.15 // Minimum voltage change to update reading (for removing fluctuations)
@@ -63,11 +66,20 @@ DateTime alarm1Time = DateTime(2025, 4, 6, 13, 35, 0); // Set the alarm time (ye
 #define battHigh 3.3 // Full battery threshold (ideally this should be the resting voltage, i.e. ~3.4V but my ESP32 reads it 3.36V)
 #define battLow 2.9  // Low battery threshold
 
-const char *ssid = "SonyBraviaX400";      // Your WiFi SSID
-const char *password = "66227617975PsA#"; // Your WiFi password
+String ssid = "";
+String password = "";
+
+// Restart control flags
+volatile bool restartPending = false;
+volatile unsigned long restartAt = 0;
+String receivedSSID = "";
+volatile bool wrongPasswordDetected = false;
 
 WiFiUDP ntpUDP;                                         // Create a UDP instance to send and receive NTP packets
 NTPClient timeClient(ntpUDP, "in.pool.ntp.org", 19800); // 19800 is offset of India, in.pool.ntp.org is close to India
+AsyncWebServer server(80);
+Preferences pref;
+
 // Weekday names for display
 static const char daysOfTheWeek[7][10] PROGMEM = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 #define COLORED 0   // 0 is black
@@ -76,6 +88,183 @@ static const char daysOfTheWeek[7][10] PROGMEM = {"Sunday", "Monday", "Tuesday",
 UBYTE image[68000];
 Epd epd;
 
+void showDetailedMsg(String msg);
+
+/**
+ * @brief Handle WiFi events - detects connection issues
+ * @param event WiFi event type
+ */
+void WiFiEvent(WiFiEvent_t event)
+{
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+  {
+    if (DEBUG)
+      Serial.println("[WiFi] WiFi disconnected event");
+  }
+}
+
+void restartWhenReady()
+{
+  if (restartPending)
+  {
+    long timeRemaining = (long)(restartAt - millis());
+    if (DEBUG && timeRemaining > 0 && timeRemaining % 1000 < 50)
+    {
+      Serial.print("[Restart] Waiting ");
+      Serial.print(timeRemaining);
+      Serial.println("ms before reboot...");
+    }
+    if ((long)(millis() - restartAt) >= 0)
+    {
+      if (DEBUG)
+        Serial.println("[Restart] Executing restart now!");
+      ESP.restart();
+    }
+  }
+}
+
+bool loadWiFiCredentials()
+{
+  pref.begin("database", false);
+  ssid = pref.getString("ssid", "");
+  password = pref.getString("password", "");
+  pref.end();
+  if (DEBUG)
+  {
+    Serial.print("[WiFi] Loaded SSID: ");
+    Serial.print(ssid.length() > 0 ? ssid : "(empty)");
+    Serial.print(", Password: ");
+    Serial.println(password.length() > 0 ? "***" : "(empty)");
+  }
+  return (ssid.length() > 0 && password.length() > 0);
+}
+
+void saveWiFiCredentials(String newSsid, String newPassword)
+{
+  if (DEBUG)
+  {
+    Serial.print("[WiFi] Saving credentials - SSID: ");
+    Serial.print(newSsid);
+    Serial.println(", Password: ***");
+  }
+  pref.begin("database", false);
+  pref.putString("ssid", newSsid);
+  pref.putString("password", newPassword);
+  ssid = newSsid;
+  password = newPassword;
+  pref.end();
+  if (DEBUG)
+    Serial.println("[WiFi] Credentials saved successfully");
+}
+
+void startWiFiManager()
+{
+  const char *apSsid = "WIFI_MANAGER";
+  const char *apPassword = "WIFImanager";
+
+  if (DEBUG)
+    Serial.println("[WiFi] No credentials found - Starting WiFi Manager AP mode");
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apSsid, apPassword);
+
+  IPAddress ip = WiFi.softAPIP();
+  if (DEBUG)
+  {
+    Serial.print("[WiFi] AP SSID: ");
+    Serial.println(apSsid);
+    Serial.print("[WiFi] AP Password: ");
+    Serial.println(apPassword);
+    Serial.print("[WiFi] AP IP address: ");
+    Serial.println(ip);
+  }
+
+  String wifiInfo = "Setup WiFi\nConnect to: " + String(apSsid) + "\nPassword: " + String(apPassword) + "\nOpen: " + ip.toString() + "/wifi";
+  epd.Init();
+  epd.Clear();
+  showDetailedMsg(wifiInfo);
+
+  if (!LittleFS.begin(true))
+  {
+    if (DEBUG)
+      Serial.println("[WiFi] ERROR: LittleFS mount failed");
+  }
+  else if (DEBUG)
+    Serial.println("[WiFi] LittleFS mounted successfully");
+
+  server.on("/wifi", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+              if (DEBUG)
+                Serial.println("[WiFi] GET /wifi - Serving WiFi Manager form");
+              if (LittleFS.exists("/wifimanager.html"))
+              {
+                request->send(LittleFS, "/wifimanager.html", "text/html");
+              }
+              else
+              {
+                if (DEBUG)
+                  Serial.println("[WiFi] ERROR: wifimanager.html not found in LittleFS");
+                request->send(404, "text/plain", "WiFi Manager file not found. Please upload data files.");
+              } });
+
+  server.on("/wifi", HTTP_POST, [](AsyncWebServerRequest *request)
+            {
+              if (DEBUG)
+                Serial.println("[WiFi] POST /wifi - Received WiFi credentials");
+              String newSsid = "";
+              String newPassword = "";
+              int params = request->params();
+
+              for (int i = 0; i < params; i++)
+              {
+                const AsyncWebParameter *p = request->getParam(i);
+                if (p->isPost())
+                {
+                  if (p->name() == "ssid")
+                  {
+                    newSsid = p->value();
+                    newSsid.trim();
+                  }
+                  else if (p->name() == "pass")
+                  {
+                    newPassword = p->value();
+                    newPassword.trim();
+                  }
+                }
+              }
+
+              if (newSsid.length() > 0 && newPassword.length() > 0)
+              {
+                if (DEBUG)
+                {
+                  Serial.print("[WiFi] Credentials received - SSID: ");
+                  Serial.print(newSsid);
+                  Serial.println(", Password: ***");
+                }
+                saveWiFiCredentials(newSsid, newPassword);
+                receivedSSID = newSsid;
+                if (DEBUG)
+                  Serial.println("[WiFi] Setting restart flag - device will restart in 5 seconds");
+                request->send(200, "text/plain", "Done. Device will now restart.");
+                restartPending = true;
+                restartAt = millis() + 5000;
+              }
+              else
+              {
+                if (DEBUG)
+                  Serial.println("[WiFi] ERROR: Invalid credentials received");
+                request->send(400, "text/plain", "Invalid WiFi credentials.");
+              } });
+
+  server.begin();
+  if (DEBUG)
+    Serial.println("[WiFi] AsyncWebServer started on port 80");
+}
+
+/**
+ * @brief Returns the number of WiFi signal bars based on RSSI
+ * @return byte Number of bars (0-5)
+ */
 byte getWiFiBars()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -116,18 +305,87 @@ float batteryLevel()
  */
 void enableWiFi()
 {
+  if (ssid.length() == 0 || password.length() == 0)
+  {
+    if (DEBUG)
+      Serial.println("[WiFi] No credentials - skipping WiFi enable");
+    return;
+  }
+
+  if (DEBUG)
+    Serial.println("[WiFi] Registering WiFi event handler for password detection...");
+
+  wrongPasswordDetected = false;
+  WiFi.onEvent(WiFiEvent);
+
+  if (DEBUG)
+    Serial.println("[WiFi] Attempting connection with saved credentials...");
+
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  WiFi.begin(ssid.c_str(), password.c_str());
 
   unsigned long startAttemptTime = millis();
   while (WiFi.status() != WL_CONNECTED &&
          millis() - startAttemptTime < WIFI_CONNECT_TIMEOUT)
   {
+    // WL_CONNECT_FAILED (4) indicates authentication failure (wrong password)
+    if (WiFi.status() == WL_CONNECT_FAILED)
+    {
+      if (DEBUG)
+        Serial.println("[WiFi] Connection failed - likely wrong password");
+      wrongPasswordDetected = true;
+      break;
+    }
     delay(100);
+  }
+
+  // Also check if timeout occurred without successful connection
+  if (WiFi.status() != WL_CONNECTED && !wrongPasswordDetected)
+  {
+    if (DEBUG)
+      Serial.println("[WiFi] Connection timeout - treating as wrong password");
+    wrongPasswordDetected = true;
+  }
+
+  if (wrongPasswordDetected)
+  {
+    if (DEBUG)
+      Serial.println("[WiFi] Password is invalid - clearing credentials and starting WiFi Manager");
+
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+
+    pref.begin("database", false);
+    pref.remove("ssid");
+    pref.remove("password");
+    pref.end();
+
+    ssid = "";
+    password = "";
+
+    // Set RTC flag, display message, and schedule reboot
+    wrongPasswordFlag = true;
+
+    if (DEBUG)
+      Serial.println("[WiFi] Displaying wrong password message on e-paper...");
+
+    epd.Init();
+    epd.Clear();
+    showDetailedMsg("WiFi Password Wrong!\n\nDevice will reboot\nand start WiFi Manager");
+
+    if (DEBUG)
+      Serial.println("[WiFi] Scheduling device reboot in 3 seconds...");
+
+    restartPending = true;
+    restartAt = millis() + 3000;
+
+    return;
   }
 
   if (WiFi.status() != WL_CONNECTED)
   {
+    if (DEBUG)
+      Serial.println("[WiFi] Connection timeout - disabling WiFi");
     disableWiFi();
   }
 }
@@ -203,6 +461,30 @@ void setup()
 {
   if (DEBUG)
     Serial.begin(115200);
+
+  if (!LittleFS.begin(true))
+  {
+    Serial.println("LittleFS mount failed");
+  }
+
+  loadWiFiCredentials();
+
+  // Check if previous wrong password flag is set
+  if (wrongPasswordFlag)
+  {
+    if (DEBUG)
+      Serial.println("[Setup] Wrong password flag detected from previous boot - starting WiFi Manager");
+    wrongPasswordFlag = false;
+    startWiFiManager();
+    return;
+  }
+
+  if (ssid == "" || password == "")
+  {
+    startWiFiManager();
+    return;
+  }
+
   disableWiFi(); // Initialize peripherals with power-optimized settings
 
   pinMode(BATPIN, INPUT);
@@ -338,6 +620,15 @@ void setup()
         if (DEBUG)
           Serial.println("Updating time from NTP server");
         bool timeUpdated = autoTimeUpdate(); // Update time from NTP server
+
+        // Check if restart is pending (wrong password detected in enableWiFi)
+        if (restartPending)
+        {
+          if (DEBUG)
+            Serial.println("[Setup] Restart pending, exiting setup to allow loop() to handle reboot");
+          return; // Exit setup early to reach loop()
+        }
+
         wifiBars = getWiFiBars();
         if (timeUpdated)
         {
@@ -353,6 +644,8 @@ void setup()
         disableWiFi(); // Turn off WiFi to save power
         pref.putBool("timeNeedsUpdate", timeNeedsUpdate);
         pref.putUChar("lastCheckedDay", currentDay); // Update last checked day
+        if (DEBUG)
+          Serial.println("[Setup] Preferences updated, continuing...");
       }
       else
       {
@@ -419,7 +712,10 @@ void setup()
   // Go to sleep now
   if (DEBUG)
   {
-    Serial.println("Going to sleep now");
+    Serial.print("[Setup] About to check sleep condition: restartPending=");
+    Serial.print(restartPending);
+    Serial.print(", percentStr=");
+    Serial.println(percentStr);
     Serial.flush();
   }
   // Configure external wake-up
@@ -428,10 +724,15 @@ void setup()
   // The RTC SQW pin is active low, CHECK README for references on Deep Sleep
   rtc_gpio_pulldown_dis(CLOCK_INTERRUPT_PIN);
   rtc_gpio_pullup_en(CLOCK_INTERRUPT_PIN);
-  if (percentStr == "USB") // if external power is connected, don't go to sleep
+  if (percentStr == "USB" || restartPending) // if external power is connected or restart pending, don't go to sleep
   {
     if (DEBUG)
-      Serial.println("External power connected, staying awake");
+    {
+      if (restartPending)
+        Serial.println("[Setup] Restart pending, staying awake to allow reboot");
+      else
+        Serial.println("External power connected, staying awake");
+    }
   }
   else
     esp_deep_sleep_start(); // Enter deep sleep mode
@@ -439,7 +740,51 @@ void setup()
 
 void loop()
 {
-  // This will never run
+  restartWhenReady();
+}
+
+/**
+ * @brief Displays a detailed setup message using the smallest notification font.
+ * @param msg Message to display in string format
+ */
+void showDetailedMsg(String msg)
+{
+  epd.display_NUM(EPD_3IN52_WHITE);
+  epd.lut_GC();
+  epd.refresh();
+  epd.SendCommand(0x50);
+  epd.SendData(0x17);
+  delay(100);
+
+  Paint paint(image, 240, 360);
+  paint.SetRotate(3);
+  paint.Clear(UNCOLORED);
+
+  String line = msg;
+  int y = 10;
+  int lineHeight = 16;
+  int lineIndex = 0;
+
+  while (line.length() > 0)
+  {
+    int newlinePos = line.indexOf('\n');
+    String currentLine = (newlinePos >= 0) ? line.substring(0, newlinePos) : line;
+    paint.DrawStringAt(8, y + (lineIndex * lineHeight), currentLine.c_str(), &Font12, COLORED);
+
+    if (newlinePos >= 0)
+      line = line.substring(newlinePos + 1);
+    else
+      line = "";
+
+    lineIndex++;
+  }
+
+  epd.display_part(paint.GetImage(), 0, 0, paint.GetWidth(), paint.GetHeight());
+  epd.lut_GC();
+  epd.refresh();
+  delay(100);
+  if (DEBUG)
+    Serial.println("end showDetailedMsg");
 }
 
 /**
